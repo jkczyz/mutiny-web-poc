@@ -1,3 +1,4 @@
+use futures::TryFutureExt;
 use futures::lock::Mutex;
 use log::debug;
 use std::str::FromStr;
@@ -67,7 +68,7 @@ impl MutinyWallet {
     pub async fn sync(&self) -> Result<(), bdk::Error> {
         let wallet = self.wallet.lock().await;
 
-        wallet.sync(&self.blockchain, SyncOptions::default()).await
+        wallet.sync(&self.blockchain, SyncOptions::default())
     }
 
     pub async fn send(
@@ -84,10 +85,10 @@ impl MutinyWallet {
         let fee_rate = if let Some(rate) = fee_rate {
             FeeRate::from_sat_per_vb(rate)
         } else {
-            self.blockchain.estimate_fee(1).await?
+            self.blockchain.estimate_fee(1)?
         };
 
-        let (psbt, details) = {
+        let (mut psbt, details) = {
             let mut builder = wallet.build_tx();
             builder
                 .add_recipient(send_to.script_pubkey(), amount)
@@ -99,8 +100,6 @@ impl MutinyWallet {
         debug!("Transaction details: {:#?}", details);
         debug!("Unsigned PSBT: {}", &psbt);
 
-        let mut psbt = psbt;
-
         let finalized = wallet.sign(&mut psbt, SignOptions::default())?;
 
         debug!("{}", finalized);
@@ -108,7 +107,7 @@ impl MutinyWallet {
         let raw_transaction = psbt.extract_tx();
         let txid = raw_transaction.txid();
 
-        let _ = &self.blockchain.broadcast(&raw_transaction).await?;
+        let _ = &self.blockchain.broadcast(&raw_transaction)?;
 
         let explorer_url = match wallet.network() {
             Network::Bitcoin => Ok("https://mempool.space/tx/"),
@@ -167,8 +166,9 @@ impl BlockSource for MutinyWallet {
 
     fn get_best_block<'a>(&'a self) -> AsyncBlockSourceResult<(BlockHash, Option<u32>)> {
         Box::pin(async {
-            let height = self.blockchain.get_height()?;
-            let hash = self.blockchain.get_tip_hash().await?;
+            // May want to use BlockSourceError::transient instead depending on the bdk::Error variant
+            let height = self.blockchain.get_height().map_err(BlockSourceError::persistent)?;
+            let hash = self.blockchain.get_tip_hash().map_err(BlockSourceError::persistent).await?;
 
             let tuple = (hash, Some(height));
             Ok(tuple)
